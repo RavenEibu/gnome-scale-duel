@@ -62,6 +62,8 @@ gi.require_version("GLib", "2.0")
 
 from gi.repository import Gtk, Adw, Gio, GLib  # noqa: E402
 
+from i18n import t  # noqa: E402
+
 APP_ID = "org.eibu.GnomeScaleDuel"
 DISPLAY_CONFIG_BUS_NAME = "org.gnome.Mutter.DisplayConfig"
 DISPLAY_CONFIG_OBJECT_PATH = "/org/gnome/Mutter/DisplayConfig"
@@ -142,18 +144,10 @@ class MutterDisplayConfig:
                 None,
             )
         except GLib.Error as e:
-            raise DisplayConfigError(
-                "No se pudo conectar a org.gnome.Mutter.DisplayConfig por "
-                "DBus. ¿Estás corriendo GNOME Shell / Mutter en esta "
-                f"sesión? Detalle: {e}"
-            ) from e
+            raise DisplayConfigError(t("err_dbus_connect", detail=e)) from e
 
         if self._proxy.get_name_owner() is None:
-            raise DisplayConfigError(
-                "El servicio org.gnome.Mutter.DisplayConfig no tiene owner "
-                "en el bus de sesión. Esta app necesita correr dentro de "
-                "una sesión de GNOME Shell (Mutter) activa."
-            )
+            raise DisplayConfigError(t("err_no_owner"))
 
     def get_current_state(self):
         """Devuelve (serial, monitores) leyendo GetCurrentState."""
@@ -167,7 +161,7 @@ class MutterDisplayConfig:
                 None,
             )
         except GLib.Error as e:
-            raise DisplayConfigError(f"GetCurrentState falló: {e}") from e
+            raise DisplayConfigError(t("err_get_state", detail=e)) from e
 
         serial, monitors_v, logical_v, _properties = result.unpack()
         monitors: dict[str, Monitor] = {}
@@ -240,7 +234,7 @@ class MutterDisplayConfig:
                 None,
             )
         except GLib.Error as e:
-            raise DisplayConfigError(f"ApplyMonitorsConfig falló: {e}") from e
+            raise DisplayConfigError(t("err_apply_config", detail=e)) from e
 
 
 def scale_candidates(mode: MonitorMode) -> list[float]:
@@ -502,19 +496,21 @@ def letter_for_index(index: int) -> str:
     return letters
 
 
-ROUND_NAMES = {
-    1: "Final",
-    2: "Semifinal",
-    4: "Cuartos de final",
-    8: "Octavos de final",
-    16: "Dieciseisavos de final",
+ROUND_NAME_KEYS = {
+    1: "round_final",
+    2: "round_semifinal",
+    4: "round_quarterfinal",
+    8: "round_roundof16",
 }
 
 
 def round_name(matches_in_round: int) -> str:
     """Nombre de ronda al estilo de un cuadro de eliminación directa de
     fútbol, según cuántos enfrentamientos tiene la ronda actual."""
-    return ROUND_NAMES.get(matches_in_round, f"Ronda de {matches_in_round * 2}")
+    key = ROUND_NAME_KEYS.get(matches_in_round)
+    if key:
+        return t(key)
+    return t("round_generic", n=matches_in_round * 2)
 
 
 @dataclass
@@ -603,9 +599,7 @@ class ScaleStage:
         self._original_scale = monitor.current_scale
         self._mode = monitor.current_mode
         if self._mode is None:
-            raise DisplayConfigError(
-                f"El monitor {monitor.connector} no reporta ningún modo actual"
-            )
+            raise DisplayConfigError(t("err_no_current_mode", connector=monitor.connector))
         self._pending = False
 
     def try_scale(self, scale: float) -> None:
@@ -680,7 +674,7 @@ class TextScaleStage:
 
 class ScaleDuelWindow(Adw.ApplicationWindow):
     def __init__(self, app: Adw.Application):
-        super().__init__(application=app, title="Escalado en duelo")
+        super().__init__(application=app, title=t("window_title"))
         self.set_default_size(560, 480)
 
         self.dc: Optional[MutterDisplayConfig] = None
@@ -723,7 +717,7 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         self.error_label = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER)
         self.error_label.add_css_class("title-3")
         box.append(self.error_label)
-        retry = Gtk.Button(label="Reintentar")
+        retry = Gtk.Button(label=t("retry_button"))
         retry.add_css_class("suggested-action")
         retry.connect("clicked", lambda *_: self._load_monitors())
         box.append(retry)
@@ -738,70 +732,50 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18,
                        margin_top=28, margin_bottom=28, margin_start=24, margin_end=24)
 
-        title = Gtk.Label(label="Elegí el monitor y el rango a comparar")
+        title = Gtk.Label(label=t("setup_title"))
         title.add_css_class("title-2")
         title.set_halign(Gtk.Align.START)
         box.append(title)
 
-        subtitle = Gtk.Label(
-            label="Definí el piso y el techo del escalado a probar. Vamos a "
-                  "armar un bracket a ciegas entre esos valores -- no vas a "
-                  "ver el porcentaje real hasta el final, solo cuál se ve "
-                  "mejor. Ahí decidís si lo aplicás o lo descartás.",
-            wrap=True, xalign=0.0,
-        )
+        subtitle = Gtk.Label(label=t("setup_subtitle"), wrap=True, xalign=0.0)
         subtitle.add_css_class("dim-label")
         box.append(subtitle)
 
-        self.monitor_group = Adw.PreferencesGroup(title="Monitor")
-        self.monitor_row = Adw.ComboRow(title="Pantalla")
+        self.monitor_group = Adw.PreferencesGroup(title=t("group_monitor"))
+        self.monitor_row = Adw.ComboRow(title=t("combo_screen"))
         self.monitor_group.add(self.monitor_row)
         box.append(self.monitor_group)
 
         self.mechanism_group = Adw.PreferencesGroup(
-            title="Mecanismo",
-            description="El escalado real de Mutter puede estar bloqueado "
-                         "por el monitor para ciertos rangos (algunos "
-                         "paneles no aceptan bajar de 100%). La densidad de "
-                         "texto/UI no tiene ese límite, pero solo afecta a "
-                         "apps que respetan la densidad de fuente del "
-                         "sistema (GTK, Electron como VSCode, Firefox), no "
-                         "la resolución real.",
+            title=t("group_mechanism"),
+            description=t("mechanism_description"),
         )
         box.append(self.mechanism_group)
-        self.mech_radio_display = Gtk.CheckButton(
-            label="Escalado real del monitor (Mutter)"
-        )
+        self.mech_radio_display = Gtk.CheckButton(label=t("mech_display_label"))
         self.mech_radio_display.set_active(True)
         self.mech_radio_display.connect("toggled", self._on_mechanism_changed)
         self.mechanism_group.add(self.mech_radio_display)
-        self.mech_radio_text = Gtk.CheckButton(
-            label="Tamaño de texto/UI (funciona con VSCode, GTK, Electron)"
-        )
+        self.mech_radio_text = Gtk.CheckButton(label=t("mech_text_label"))
         self.mech_radio_text.set_group(self.mech_radio_display)
         self.mechanism_group.add(self.mech_radio_text)
 
-        self.mode_choice_group = Adw.PreferencesGroup(title="Modo de comparación")
+        self.mode_choice_group = Adw.PreferencesGroup(title=t("group_compare_mode"))
         box.append(self.mode_choice_group)
-        self.mode_radio_size = Gtk.CheckButton(
-            label="Recomendado por tamaño físico (rango continuo)"
-        )
+        self.mode_radio_size = Gtk.CheckButton(label=t("mode_size_label"))
         self.mode_radio_size.set_active(True)
         self.mode_radio_size.connect("toggled", self._on_compare_mode_changed)
         self.mode_choice_group.add(self.mode_radio_size)
-        self.mode_radio_equiv = Gtk.CheckButton(
-            label="Equivalencia a resoluciones conocidas (720p, 1080p, 1440p, 4K...)"
-        )
+        self.mode_radio_equiv = Gtk.CheckButton(label=t("mode_equiv_label"))
         self.mode_radio_equiv.set_group(self.mode_radio_size)
         self.mode_choice_group.add(self.mode_radio_equiv)
 
         self.detect_group = Adw.PreferencesGroup(
-            title="Tamaño físico y densidad",
-            description="Usado solo para calcular una recomendación de rango.",
+            title=t("group_detect"),
+            description=t("detect_description"),
         )
         box.append(self.detect_group)
         self.diagonal_row = Adw.SpinRow.new_with_range(5.0, 100.0, 0.1)
-        self.diagonal_row.set_title("Diagonal del panel (pulgadas)")
+        self.diagonal_row.set_title(t("diagonal_title"))
         self.diagonal_row.set_digits(1)
         self.diagonal_row.connect("notify::value", lambda *_: self._on_diagonal_changed())
         self.detect_group.add(self.diagonal_row)
@@ -810,56 +784,46 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         self.detect_group.add(self.detect_label)
 
         self.range_group = Adw.PreferencesGroup(
-            title="Rango de escalado a duelar",
-            description="Piso y techo del bracket de eliminación directa. "
-                         "Se toman todos los escalados que soporta el monitor "
-                         "dentro de ese rango.",
+            title=t("group_range"),
+            description=t("range_description"),
         )
         box.append(self.range_group)
         self.min_row = Adw.SpinRow.new_with_range(50, 400, 5)
-        self.min_row.set_title("Mínimo (%)")
+        self.min_row.set_title(t("min_pct"))
         self.range_group.add(self.min_row)
         self.max_row = Adw.SpinRow.new_with_range(50, 400, 5)
-        self.max_row.set_title("Máximo (%)")
+        self.max_row.set_title(t("max_pct"))
         self.range_group.add(self.max_row)
 
         self.equiv_group = Adw.PreferencesGroup(
-            title="Resoluciones equivalentes",
-            description="Solo se ofrecen las que este monitor soporta de "
-                         "verdad (mismo aspect ratio, escala exacta que "
-                         "acepta Mutter). Marcá al menos dos para duelar.",
+            title=t("group_equiv"),
+            description=t("equiv_description"),
         )
         self.equiv_group.set_visible(False)
         box.append(self.equiv_group)
         self.equiv_checks: dict[float, Gtk.CheckButton] = {}
         self._equiv_rows: list[Gtk.CheckButton] = []
-        self.equiv_empty_label = Gtk.Label(
-            label="Este monitor no ofrece equivalencias de resolución "
-                  "conocidas dentro de lo que Mutter permite.",
-            wrap=True, xalign=0.0,
-        )
+        self.equiv_empty_label = Gtk.Label(label=t("equiv_empty"), wrap=True, xalign=0.0)
         self.equiv_empty_label.add_css_class("dim-label")
         self.equiv_empty_label.set_visible(False)
         self.equiv_group.add(self.equiv_empty_label)
 
         self.text_range_group = Adw.PreferencesGroup(
-            title="Rango de densidad de texto/UI a duelar",
-            description="Porcentaje del tamaño de fuente del sistema "
-                         "(text-scaling-factor). Acepta cualquier valor "
-                         "entre 50% y 300%, sin restricciones del monitor.",
+            title=t("group_text_range"),
+            description=t("text_range_description"),
         )
         self.text_range_group.set_visible(False)
         box.append(self.text_range_group)
         self.text_min_row = Adw.SpinRow.new_with_range(50, 300, 5)
-        self.text_min_row.set_title("Mínimo (%)")
+        self.text_min_row.set_title(t("min_pct"))
         self.text_min_row.set_value(75)
         self.text_range_group.add(self.text_min_row)
         self.text_max_row = Adw.SpinRow.new_with_range(50, 300, 5)
-        self.text_max_row.set_title("Máximo (%)")
+        self.text_max_row.set_title(t("max_pct"))
         self.text_max_row.set_value(100)
         self.text_range_group.add(self.text_max_row)
 
-        start_btn = Gtk.Button(label="Empezar los duelos a ciegas")
+        start_btn = Gtk.Button(label=t("start_button"))
         start_btn.add_css_class("suggested-action")
         start_btn.add_css_class("pill")
         start_btn.set_halign(Gtk.Align.CENTER)
@@ -890,7 +854,7 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
             return False
 
         if not self.monitors:
-            self._show_error("Mutter no reportó ningún monitor conectado.")
+            self._show_error(t("err_no_monitors"))
             return False
 
         model = Gtk.StringList()
@@ -938,20 +902,21 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
 
         targets = resolution_targets(mode)
         self.equiv_empty_label.set_visible(not targets)
-        for t in targets:
-            if t.achievable:
-                check = Gtk.CheckButton(
-                    label=f"{t.label} ({t.target_width}x{t.target_height}, "
-                          f"{round(t.achievable_scale * 100)}%)"
-                )
-                check.set_active(abs(t.achievable_scale - 1.0) < 1e-6)
-                self.equiv_checks[t.achievable_scale] = check
+        for target in targets:
+            if target.achievable:
+                check = Gtk.CheckButton(label=t(
+                    "equiv_check_label", label=target.label,
+                    w=target.target_width, h=target.target_height,
+                    pct=round(target.achievable_scale * 100),
+                ))
+                check.set_active(abs(target.achievable_scale - 1.0) < 1e-6)
+                self.equiv_checks[target.achievable_scale] = check
             else:
-                check = Gtk.CheckButton(
-                    label=f"{t.label} ({t.target_width}x{t.target_height}, "
-                          f"necesitaría {round(t.ideal_scale * 100)}% -- este "
-                          f"monitor no lo soporta)"
-                )
+                check = Gtk.CheckButton(label=t(
+                    "equiv_check_unavailable", label=target.label,
+                    w=target.target_width, h=target.target_height,
+                    pct=round(target.ideal_scale * 100),
+                ))
                 check.set_sensitive(False)
             self.equiv_group.add(check)
             self._equiv_rows.append(check)
@@ -975,12 +940,12 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         rec = recommend_scale(ppi)
         lo, hi = recommend_range(rec, self._current_candidates or mode.supported_scales)
 
-        origin = "detectada por EDID" if self._diagonal_source_detected else "ingresada a mano"
-        self.detect_label.set_label(
-            f"Resolución {mode.width}x{mode.height}, diagonal {origin} de "
-            f"{diagonal:.1f}\" -> ~{ppi:.0f} PPI. Recomendación: ~"
-            f"{round(rec * 100)}%, rango sugerido {round(lo * 100)}%–{round(hi * 100)}%."
-        )
+        origin = t("origin_edid") if self._diagonal_source_detected else t("origin_manual")
+        self.detect_label.set_label(t(
+            "detect_label_text", w=mode.width, h=mode.height, origin=origin,
+            diagonal=diagonal, ppi=ppi, rec_pct=round(rec * 100),
+            lo_pct=round(lo * 100), hi_pct=round(hi * 100),
+        ))
         self.min_row.set_value(round(lo * 100))
         self.max_row.set_value(round(hi * 100))
 
@@ -990,7 +955,7 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
             hi = self.text_max_row.get_value() / 100.0
             levels = text_scale_candidates(lo, hi)
             if len(levels) < 2:
-                self._toast("Ese rango de texto/UI es muy angosto -- ampliá el mínimo/máximo")
+                self._toast(t("toast_text_range_narrow"))
                 return
             self.stage = TextScaleStage()
             self.duel = DuelState(levels)
@@ -1006,15 +971,12 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
             hi = self.max_row.get_value() / 100.0
             levels = filter_candidates_by_range(self._current_candidates, lo, hi)
             if len(levels) < 2:
-                self._toast(
-                    "Ese rango solo tiene un escalado soportado por el "
-                    "monitor -- ampliá el mínimo/máximo"
-                )
+                self._toast(t("toast_range_narrow"))
                 return
         else:
             levels = [lvl for lvl, chk in self.equiv_checks.items() if chk.get_active()]
             if len(levels) < 2:
-                self._toast("Marcá al menos dos resoluciones equivalentes para duelar")
+                self._toast(t("toast_need_two_equiv"))
                 return
 
         try:
@@ -1052,7 +1014,7 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         buttons.append(self.btn_b)
         box.append(buttons)
 
-        replay = Gtk.Button(label="Volver a mostrar ambas (alternar)")
+        replay = Gtk.Button(label=t("replay_button"))
         replay.connect("clicked", lambda *_: self._toggle_preview())
         box.append(replay)
 
@@ -1067,12 +1029,12 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
             return
         this_match, total = self.duel.progress()
         self.progress_label.set_label(
-            f"{round_name(total)} — enfrentamiento {this_match} de {total}"
+            t("match_progress", round=round_name(total), this=this_match, total=total)
         )
         self._current_match = match
         self._preview_showing_first = True
-        self.btn_a.set_label(f"Elegir {self.duel.labels[match.a]}")
-        self.btn_b.set_label(f"Elegir {self.duel.labels[match.b]}")
+        self.btn_a.set_label(t("choose_button", letter=self.duel.labels[match.a]))
+        self.btn_b.set_label(t("choose_button", letter=self.duel.labels[match.b]))
         self._apply_preview(match.a)
         self.stack.set_visible_child_name("duel")
 
@@ -1080,9 +1042,9 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         letter = self.duel.labels.get(scale, "?")
         try:
             self.stage.try_scale(scale)
-            self.showing_label.set_label(f"Mostrando ahora: opción {letter}.")
+            self.showing_label.set_label(t("showing_now", letter=letter))
         except DisplayConfigError as e:
-            self._toast(f"No se pudo aplicar la opción {letter}: {e}")
+            self._toast(t("toast_apply_failed", letter=letter, detail=e))
 
     def _toggle_preview(self) -> None:
         match = self._current_match
@@ -1105,10 +1067,7 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         # el ganador queda aplicado en modo TEST (ya lo estaba, del último
         # duelo) mientras el usuario decide si lo confirma o lo descarta
         self.result_pct_label.set_label(f"{round(winner * 100)}%")
-        self.result_note.set_label(
-            "Así quedó la pantalla ahora mismo con el ganador del bracket. "
-            "¿Lo dejamos aplicado o volvemos al escalado que tenías antes?"
-        )
+        self.result_note.set_label(t("result_note_initial"))
         self.stack.set_visible_child_name("result")
 
     def _lock_decision_buttons(self) -> None:
@@ -1123,7 +1082,7 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
 
     def _confirm_dialog(self, heading: str, body: str, accept_label: str, on_accept) -> None:
         dialog = Adw.AlertDialog(heading=heading, body=body)
-        dialog.add_response("cancel", "Cancelar")
+        dialog.add_response("cancel", t("dialog_cancel"))
         dialog.add_response("accept", accept_label)
         dialog.set_response_appearance("accept", Adw.ResponseAppearance.SUGGESTED)
         dialog.set_default_response("accept")
@@ -1139,40 +1098,35 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         dialog.present(self)
 
     def _on_apply_winner(self, _btn) -> None:
+        what = (t("what_text") if isinstance(self.stage, TextScaleStage)
+                else t("what_display"))
+
         def do_apply():
             try:
                 self.stage.confirm(self._winner_scale)
-                self.result_note.set_label(
-                    "Se aplicó y quedó guardado como escalado del monitor."
-                )
+                self.result_note.set_label(t("result_note_applied", what=what))
             except DisplayConfigError as e:
-                self.result_note.set_label(f"No se pudo dejarlo guardado: {e}")
+                self.result_note.set_label(t("result_note_apply_failed", detail=e))
                 return
             self.close()
 
-        what = ("tamaño de texto/UI" if isinstance(self.stage, TextScaleStage)
-                else "escalado de este monitor")
         self._confirm_dialog(
-            heading="¿Aplicar y guardar este escalado?",
-            body=f"Se va a guardar {round(self._winner_scale * 100)}% como "
-                 f"{what} y la ventana se va a cerrar.",
-            accept_label="Aplicar y cerrar",
+            heading=t("apply_dialog_heading"),
+            body=t("apply_dialog_body", pct=round(self._winner_scale * 100), what=what),
+            accept_label=t("apply_dialog_accept"),
             on_accept=do_apply,
         )
 
     def _on_discard_winner(self, _btn) -> None:
         def do_discard():
             self.stage.restore_original()
-            self.result_note.set_label(
-                "No se guardó ningún cambio: se restauró el escalado anterior."
-            )
+            self.result_note.set_label(t("result_note_discarded"))
             self.close()
 
         self._confirm_dialog(
-            heading="¿Descartar y restaurar?",
-            body="Se va a volver al escalado que tenías antes de abrir la "
-                 "app y la ventana se va a cerrar.",
-            accept_label="Descartar y cerrar",
+            heading=t("discard_dialog_heading"),
+            body=t("discard_dialog_body"),
+            accept_label=t("discard_dialog_accept"),
             on_accept=do_discard,
         )
 
@@ -1181,7 +1135,7 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14,
                        valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER,
                        margin_top=40, margin_bottom=40, margin_start=24, margin_end=24)
-        title = Gtk.Label(label="Ganador del bracket")
+        title = Gtk.Label(label=t("result_title"))
         title.add_css_class("title-2")
         box.append(title)
         self.result_pct_label = Gtk.Label(label="--")
@@ -1193,19 +1147,19 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
 
         decision = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
                             homogeneous=True, halign=Gtk.Align.CENTER)
-        apply_btn = Gtk.Button(label="Aplicar y guardar")
+        apply_btn = Gtk.Button(label=t("apply_button"))
         apply_btn.add_css_class("suggested-action")
         apply_btn.add_css_class("pill")
         apply_btn.connect("clicked", self._on_apply_winner)
         decision.append(apply_btn)
-        discard_btn = Gtk.Button(label="Descartar y restaurar")
+        discard_btn = Gtk.Button(label=t("discard_button"))
         discard_btn.add_css_class("pill")
         discard_btn.connect("clicked", self._on_discard_winner)
         decision.append(discard_btn)
         box.append(decision)
         self._decision_buttons = [apply_btn, discard_btn]
 
-        self.again_btn = Gtk.Button(label="Repetir con otro rango")
+        self.again_btn = Gtk.Button(label=t("again_button"))
         self.again_btn.connect(
             "clicked", lambda *_: self.stack.set_visible_child_name("setup")
         )
