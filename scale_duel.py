@@ -1116,31 +1116,65 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
             btn.set_sensitive(False)
         self.again_btn.set_sensitive(False)
 
-    def _on_apply_winner(self, _btn) -> None:
-        try:
-            self.stage.confirm(self._winner_scale)
-            self.result_note.set_label(
-                "Se aplicó y quedó guardado como escalado del monitor. "
-                "Cerrando la ventana..."
-            )
-        except DisplayConfigError as e:
-            self.result_note.set_label(f"No se pudo dejarlo guardado: {e}")
-            return
+    def _unlock_decision_buttons(self) -> None:
+        for btn in self._decision_buttons:
+            btn.set_sensitive(True)
+        self.again_btn.set_sensitive(True)
+
+    def _confirm_dialog(self, heading: str, body: str, accept_label: str, on_accept) -> None:
+        dialog = Adw.AlertDialog(heading=heading, body=body)
+        dialog.add_response("cancel", "Cancelar")
+        dialog.add_response("accept", accept_label)
+        dialog.set_response_appearance("accept", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("accept")
+        dialog.set_close_response("cancel")
+
+        def _on_response(_dlg, response_id):
+            self._unlock_decision_buttons()
+            if response_id == "accept":
+                on_accept()
+
+        dialog.connect("response", _on_response)
         self._lock_decision_buttons()
-        GLib.timeout_add(1500, self._close_after_decision)
+        dialog.present(self)
+
+    def _on_apply_winner(self, _btn) -> None:
+        def do_apply():
+            try:
+                self.stage.confirm(self._winner_scale)
+                self.result_note.set_label(
+                    "Se aplicó y quedó guardado como escalado del monitor."
+                )
+            except DisplayConfigError as e:
+                self.result_note.set_label(f"No se pudo dejarlo guardado: {e}")
+                return
+            self.close()
+
+        what = ("tamaño de texto/UI" if isinstance(self.stage, TextScaleStage)
+                else "escalado de este monitor")
+        self._confirm_dialog(
+            heading="¿Aplicar y guardar este escalado?",
+            body=f"Se va a guardar {round(self._winner_scale * 100)}% como "
+                 f"{what} y la ventana se va a cerrar.",
+            accept_label="Aplicar y cerrar",
+            on_accept=do_apply,
+        )
 
     def _on_discard_winner(self, _btn) -> None:
-        self.stage.restore_original()
-        self.result_note.set_label(
-            "No se guardó ningún cambio: se restauró el escalado anterior. "
-            "Cerrando la ventana..."
-        )
-        self._lock_decision_buttons()
-        GLib.timeout_add(1500, self._close_after_decision)
+        def do_discard():
+            self.stage.restore_original()
+            self.result_note.set_label(
+                "No se guardó ningún cambio: se restauró el escalado anterior."
+            )
+            self.close()
 
-    def _close_after_decision(self) -> bool:
-        self.close()
-        return False
+        self._confirm_dialog(
+            heading="¿Descartar y restaurar?",
+            body="Se va a volver al escalado que tenías antes de abrir la "
+                 "app y la ventana se va a cerrar.",
+            accept_label="Descartar y cerrar",
+            on_accept=do_discard,
+        )
 
     # -- página de resultado -------------------------------------------------
     def _build_result_page(self) -> None:
