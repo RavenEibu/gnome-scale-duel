@@ -1111,20 +1111,36 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         )
         self.stack.set_visible_child_name("result")
 
+    def _lock_decision_buttons(self) -> None:
+        for btn in self._decision_buttons:
+            btn.set_sensitive(False)
+        self.again_btn.set_sensitive(False)
+
     def _on_apply_winner(self, _btn) -> None:
         try:
             self.stage.confirm(self._winner_scale)
             self.result_note.set_label(
-                "Se aplicó y quedó guardado como escalado del monitor."
+                "Se aplicó y quedó guardado como escalado del monitor. "
+                "Cerrando la ventana..."
             )
         except DisplayConfigError as e:
             self.result_note.set_label(f"No se pudo dejarlo guardado: {e}")
+            return
+        self._lock_decision_buttons()
+        GLib.timeout_add(1500, self._close_after_decision)
 
     def _on_discard_winner(self, _btn) -> None:
         self.stage.restore_original()
         self.result_note.set_label(
-            "No se guardó ningún cambio: se restauró el escalado anterior."
+            "No se guardó ningún cambio: se restauró el escalado anterior. "
+            "Cerrando la ventana..."
         )
+        self._lock_decision_buttons()
+        GLib.timeout_add(1500, self._close_after_decision)
+
+    def _close_after_decision(self) -> bool:
+        self.close()
+        return False
 
     # -- página de resultado -------------------------------------------------
     def _build_result_page(self) -> None:
@@ -1153,10 +1169,13 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         discard_btn.connect("clicked", self._on_discard_winner)
         decision.append(discard_btn)
         box.append(decision)
+        self._decision_buttons = [apply_btn, discard_btn]
 
-        again = Gtk.Button(label="Repetir con otro rango")
-        again.connect("clicked", lambda *_: self.stack.set_visible_child_name("setup"))
-        box.append(again)
+        self.again_btn = Gtk.Button(label="Repetir con otro rango")
+        self.again_btn.connect(
+            "clicked", lambda *_: self.stack.set_visible_child_name("setup")
+        )
+        box.append(self.again_btn)
         self.stack.add_named(box, "result")
 
     # -- utilidades ------------------------------------------------------
