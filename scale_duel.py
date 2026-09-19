@@ -215,21 +215,17 @@ class MutterDisplayConfig:
         monitor elegido."""
         assert self._proxy is not None
 
-        logical_monitors = GLib.Variant(
-            "a(iiduba(ssa{sv}))",
-            [(
-                monitor.current_x,
-                monitor.current_y,
-                scale,
-                monitor.current_transform,
-                monitor.is_primary,
-                [(monitor.connector, mode_id, {})],
-            )],
-        )
-        properties = GLib.Variant("a{sv}", {})
+        logical_monitors = [(
+            monitor.current_x,
+            monitor.current_y,
+            scale,
+            monitor.current_transform,
+            monitor.is_primary,
+            [(monitor.connector, mode_id, {})],
+        )]
         args = GLib.Variant(
             "(uua(iiduba(ssa{sv}))a{sv})",
-            (serial, method, logical_monitors, properties),
+            (serial, method, logical_monitors, {}),
         )
         try:
             self._proxy.call_sync(
