@@ -1,0 +1,7 @@
+# Estas dependencias son bindings de sistema (PyGObject + typelibs de
+# GTK4/libadwaita), no paquetes de PyPI puros. En Arch se instalan asi:
+#
+#   sudo pacman -S python-gobject gtk4 libadwaita
+#
+# Este archivo queda como referencia, pip no puede instalar PyGObject
+# de forma confiable sin las libs de sistema ya presentes.
