@@ -73,7 +73,7 @@ from scale_duel import (  # noqa: E402
     DuelState, scale_candidates, MonitorMode,
     filter_candidates_by_range, diagonal_inches, parse_edid_physical_size_cm,
     compute_ppi, recommend_scale, recommend_range, resolution_equivalents,
-    resolution_targets, text_scale_candidates,
+    resolution_targets, text_scale_candidates, letter_for_index, round_name,
 )
 
 
@@ -309,3 +309,45 @@ def test_text_scale_candidates_swaps_inverted_bounds():
     a = text_scale_candidates(1.0, 0.8)
     b = text_scale_candidates(0.8, 1.0)
     assert a == b
+
+
+def test_letter_for_index_basic_and_overflow():
+    assert letter_for_index(0) == "A"
+    assert letter_for_index(25) == "Z"
+    assert letter_for_index(26) == "AA"
+    assert letter_for_index(27) == "AB"
+
+
+def test_round_name_matches_football_stages():
+    assert round_name(1) == "Final"
+    assert round_name(2) == "Semifinal"
+    assert round_name(4) == "Cuartos de final"
+    assert round_name(8) == "Octavos de final"
+    assert round_name(3) == "Ronda de 6"
+
+
+def test_duel_labels_do_not_correlate_with_scale_order():
+    # con niveles ya ordenados ascendentemente (como llegan de la UI),
+    # la letra no debe quedar pegada al orden de magnitud: probamos con
+    # varias semillas y pedimos que al menos una rompa el orden
+    # ascendente estricto (A=menor, ..., H=mayor).
+    levels = [1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75]
+    broke_order_at_least_once = False
+    for seed in range(20):
+        d = DuelState(levels, rng=random.Random(seed))
+        by_letter = sorted(d.labels.items(), key=lambda kv: kv[1])
+        ordered_values = [v for v, _ in by_letter]
+        if ordered_values != sorted(ordered_values):
+            broke_order_at_least_once = True
+            break
+    assert broke_order_at_least_once
+
+
+def test_duel_labels_stable_across_whole_tournament():
+    levels = [1.0, 1.25, 1.5, 1.75]
+    d = DuelState(levels, rng=random.Random(7))
+    labels_snapshot = dict(d.labels)
+    while not d.finished:
+        match = d.current_match()
+        d.pick(match.a)
+        assert d.labels == labels_snapshot

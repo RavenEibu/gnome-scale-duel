@@ -491,6 +491,32 @@ def resolution_targets(
     return out
 
 
+def letter_for_index(index: int) -> str:
+    """A, B, C, ..., Z, AA, AB, ... (para no quedarse sin letras si
+    algún día hay más de 26 candidatos)."""
+    n = index + 1
+    letters = ""
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
+ROUND_NAMES = {
+    1: "Final",
+    2: "Semifinal",
+    4: "Cuartos de final",
+    8: "Octavos de final",
+    16: "Dieciseisavos de final",
+}
+
+
+def round_name(matches_in_round: int) -> str:
+    """Nombre de ronda al estilo de un cuadro de eliminación directa de
+    fútbol, según cuántos enfrentamientos tiene la ronda actual."""
+    return ROUND_NAMES.get(matches_in_round, f"Ronda de {matches_in_round * 2}")
+
+
 @dataclass
 class Match:
     a: float
@@ -505,6 +531,15 @@ class DuelState:
         if len(levels) < 2:
             raise ValueError("Hacen falta al menos 2 niveles de escalado")
         self._rng = rng or random.Random()
+        # las letras se asignan sobre un orden barajado (no el orden en
+        # que vienen los niveles, que suele estar ordenado de menor a
+        # mayor escala) para que "A" no sea siempre el más bajo y "H" el
+        # más alto -- eso delataría el valor real sin mostrarlo. Cada
+        # candidato mantiene su letra a lo largo de todo el torneo.
+        shuffled_for_labels = self._shuffle(levels)
+        self.labels: dict[float, str] = {
+            level: letter_for_index(i) for i, level in enumerate(shuffled_for_labels)
+        }
         self.round_list: list[float] = self._shuffle(levels)
         self.round_num = 1
         self.match_index = 0
@@ -1001,21 +1036,17 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         self.progress_label.add_css_class("dim-label")
         box.append(self.progress_label)
 
-        info = Gtk.Label(
-            label="Mirá la pantalla, no el número: acabamos de aplicar la "
-                  "opción A. Elegí la que se vea mejor, a ciegas.",
-            wrap=True, xalign=0.0,
-        )
-        box.append(info)
+        self.showing_label = Gtk.Label(wrap=True, xalign=0.0)
+        box.append(self.showing_label)
 
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
                            homogeneous=True)
-        self.btn_a = Gtk.Button(label="Opción A")
+        self.btn_a = Gtk.Button()
         self.btn_a.add_css_class("pill")
         self.btn_a.connect("clicked", lambda *_: self._on_pick(0))
         buttons.append(self.btn_a)
 
-        self.btn_b = Gtk.Button(label="Opción B")
+        self.btn_b = Gtk.Button()
         self.btn_b.add_css_class("pill")
         self.btn_b.connect("clicked", lambda *_: self._on_pick(1))
         buttons.append(self.btn_b)
@@ -1036,18 +1067,22 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
             return
         this_match, total = self.duel.progress()
         self.progress_label.set_label(
-            f"Ronda {self.duel.round_num} — enfrentamiento {this_match} de {total}"
+            f"{round_name(total)} — enfrentamiento {this_match} de {total}"
         )
         self._current_match = match
         self._preview_showing_first = True
+        self.btn_a.set_label(f"Elegir {self.duel.labels[match.a]}")
+        self.btn_b.set_label(f"Elegir {self.duel.labels[match.b]}")
         self._apply_preview(match.a)
         self.stack.set_visible_child_name("duel")
 
     def _apply_preview(self, scale: float) -> None:
+        letter = self.duel.labels.get(scale, "?")
         try:
             self.stage.try_scale(scale)
+            self.showing_label.set_label(f"Mostrando ahora: opción {letter}.")
         except DisplayConfigError as e:
-            self._toast(f"No se pudo aplicar esa opción: {e}")
+            self._toast(f"No se pudo aplicar la opción {letter}: {e}")
 
     def _toggle_preview(self) -> None:
         match = self._current_match
