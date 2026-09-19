@@ -73,7 +73,7 @@ from scale_duel import (  # noqa: E402
     DuelState, scale_candidates, MonitorMode,
     filter_candidates_by_range, diagonal_inches, parse_edid_physical_size_cm,
     compute_ppi, recommend_scale, recommend_range, resolution_equivalents,
-    resolution_targets,
+    resolution_targets, text_scale_candidates,
 )
 
 
@@ -288,3 +288,24 @@ def test_resolution_targets_marks_unachievable_1440p_on_real_laptop_panel():
     # "más chico lógico")
     scales = [t.ideal_scale for t in targets.values()]
     assert scales == sorted(scales)
+
+
+def test_text_scale_candidates_basic_range():
+    candidates = text_scale_candidates(0.75, 1.0, step=0.05)
+    assert candidates[0] == 0.75
+    assert candidates[-1] == 1.0
+    assert 1.0 in candidates
+    assert all(0.75 - 1e-6 <= c <= 1.0 + 1e-6 for c in candidates)
+    assert candidates == sorted(candidates)
+
+
+def test_text_scale_candidates_clamped_to_schema_bounds():
+    candidates = text_scale_candidates(0.1, 10.0, step=0.5)
+    assert min(candidates) >= 0.5 - 1e-6
+    assert max(candidates) <= 3.0 + 1e-6
+
+
+def test_text_scale_candidates_swaps_inverted_bounds():
+    a = text_scale_candidates(1.0, 0.8)
+    b = text_scale_candidates(0.8, 1.0)
+    assert a == b

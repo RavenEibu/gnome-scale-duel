@@ -372,6 +372,34 @@ COMMON_RESOLUTIONS: list[tuple[int, int, str]] = [
 ]
 
 
+TEXT_SCALING_FACTOR_BOUNDS = (0.5, 3.0)  # límites reales del esquema GSettings
+
+
+def text_scale_candidates(lo: float, hi: float, step: float = 0.05) -> list[float]:
+    """Candidatos de densidad de texto/UI (org.gnome.desktop.interface
+    text-scaling-factor) entre lo y hi, en pasos de `step`, recortados
+    al rango que acepta el esquema GSettings (a diferencia del scale de
+    Mutter, acá cualquier valor del rango es válido -- no hay una lista
+    de "soportados" que consultar)."""
+    if lo > hi:
+        lo, hi = hi, lo
+    bound_lo, bound_hi = TEXT_SCALING_FACTOR_BOUNDS
+    lo = max(bound_lo, lo)
+    hi = min(bound_hi, hi)
+    if lo > hi:
+        return []
+    candidates = set()
+    v = round(lo / step) * step
+    while v <= hi + 1e-9:
+        candidates.add(round(v, 2))
+        v += step
+    candidates.add(round(lo, 2))
+    candidates.add(round(hi, 2))
+    if lo - 1e-9 <= 1.0 <= hi + 1e-9:
+        candidates.add(1.0)
+    return sorted(c for c in candidates if lo - 1e-6 <= c <= hi + 1e-6)
+
+
 @dataclass
 class ResolutionEquivalent:
     scale: float
@@ -576,6 +604,41 @@ class ScaleStage:
         self._pending = False
 
 
+TEXT_SCALING_SCHEMA = "org.gnome.desktop.interface"
+TEXT_SCALING_KEY = "text-scaling-factor"
+
+# Cuánto esperar sin confirmación antes de revertir un preview de texto
+# solo (Mutter tiene su propio timeout para el TEST real; acá lo
+# imitamos a mano porque GSettings no revierte nada por su cuenta).
+TEXT_REVERT_SECONDS = 20
+
+
+class TextScaleStage:
+    """Mismo ciclo try/confirm/restore que ScaleStage, pero para
+    org.gnome.desktop.interface text-scaling-factor -- no cambia la
+    resolución real, solo la densidad de texto/UI (Xft DPI), y por eso
+    acepta cualquier valor continuo del rango sin que el compositor lo
+    rechace. Muchas apps (GTK, Electron como VSCode, Firefox) escalan
+    su UI en proporción a esto, aunque el framebuffer no cambie."""
+
+    def __init__(self):
+        self._settings = Gio.Settings.new(TEXT_SCALING_SCHEMA)
+        self._original_value = self._settings.get_double(TEXT_SCALING_KEY)
+        self._pending = False
+
+    def try_scale(self, scale: float) -> None:
+        self._settings.set_double(TEXT_SCALING_KEY, scale)
+        self._pending = True
+
+    def confirm(self, scale: float) -> None:
+        self._settings.set_double(TEXT_SCALING_KEY, scale)
+        self._pending = False
+
+    def restore_original(self) -> None:
+        self._settings.set_double(TEXT_SCALING_KEY, self._original_value)
+        self._pending = False
+
+
 # ---------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------
@@ -660,6 +723,29 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         self.monitor_group.add(self.monitor_row)
         box.append(self.monitor_group)
 
+        self.mechanism_group = Adw.PreferencesGroup(
+            title="Mecanismo",
+            description="El escalado real de Mutter puede estar bloqueado "
+                         "por el monitor para ciertos rangos (algunos "
+                         "paneles no aceptan bajar de 100%). La densidad de "
+                         "texto/UI no tiene ese límite, pero solo afecta a "
+                         "apps que respetan la densidad de fuente del "
+                         "sistema (GTK, Electron como VSCode, Firefox), no "
+                         "la resolución real.",
+        )
+        box.append(self.mechanism_group)
+        self.mech_radio_display = Gtk.CheckButton(
+            label="Escalado real del monitor (Mutter)"
+        )
+        self.mech_radio_display.set_active(True)
+        self.mech_radio_display.connect("toggled", self._on_mechanism_changed)
+        self.mechanism_group.add(self.mech_radio_display)
+        self.mech_radio_text = Gtk.CheckButton(
+            label="Tamaño de texto/UI (funciona con VSCode, GTK, Electron)"
+        )
+        self.mech_radio_text.set_group(self.mech_radio_display)
+        self.mechanism_group.add(self.mech_radio_text)
+
         self.mode_choice_group = Adw.PreferencesGroup(title="Modo de comparación")
         box.append(self.mode_choice_group)
         self.mode_radio_size = Gtk.CheckButton(
@@ -721,6 +807,23 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         self.equiv_empty_label.set_visible(False)
         self.equiv_group.add(self.equiv_empty_label)
 
+        self.text_range_group = Adw.PreferencesGroup(
+            title="Rango de densidad de texto/UI a duelar",
+            description="Porcentaje del tamaño de fuente del sistema "
+                         "(text-scaling-factor). Acepta cualquier valor "
+                         "entre 50% y 300%, sin restricciones del monitor.",
+        )
+        self.text_range_group.set_visible(False)
+        box.append(self.text_range_group)
+        self.text_min_row = Adw.SpinRow.new_with_range(50, 300, 5)
+        self.text_min_row.set_title("Mínimo (%)")
+        self.text_min_row.set_value(75)
+        self.text_range_group.add(self.text_min_row)
+        self.text_max_row = Adw.SpinRow.new_with_range(50, 300, 5)
+        self.text_max_row.set_title("Máximo (%)")
+        self.text_max_row.set_value(100)
+        self.text_range_group.add(self.text_max_row)
+
         start_btn = Gtk.Button(label="Empezar los duelos a ciegas")
         start_btn.add_css_class("suggested-action")
         start_btn.add_css_class("pill")
@@ -730,6 +833,17 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
 
         scroller = Gtk.ScrolledWindow(child=box, vexpand=True)
         self.stack.add_named(scroller, "setup")
+
+    def _on_mechanism_changed(self, _btn) -> None:
+        display_mode = self.mech_radio_display.get_active()
+        self.mode_choice_group.set_visible(display_mode)
+        self.text_range_group.set_visible(not display_mode)
+        if display_mode:
+            self._on_compare_mode_changed(None)
+        else:
+            self.detect_group.set_visible(False)
+            self.range_group.set_visible(False)
+            self.equiv_group.set_visible(False)
 
     def _load_monitors(self) -> bool:
         self.dc = MutterDisplayConfig()
@@ -836,6 +950,18 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         self.max_row.set_value(round(hi * 100))
 
     def _on_start_clicked(self, _btn) -> None:
+        if self.mech_radio_text.get_active():
+            lo = self.text_min_row.get_value() / 100.0
+            hi = self.text_max_row.get_value() / 100.0
+            levels = text_scale_candidates(lo, hi)
+            if len(levels) < 2:
+                self._toast("Ese rango de texto/UI es muy angosto -- ampliá el mínimo/máximo")
+                return
+            self.stage = TextScaleStage()
+            self.duel = DuelState(levels)
+            self._start_current_match()
+            return
+
         idx = self.monitor_row.get_selected()
         connector = self._monitor_connectors[idx]
         monitor = self.monitors[connector]
@@ -1003,10 +1129,12 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         self.toast_overlay.add_toast(Adw.Toast.new(message))
 
     def _on_close_request(self, *_args) -> bool:
-        # si hay un TEST pendiente sin confirmar, Mutter lo revierte solo
-        # (timeout interno). Si querés forzar la restauración explícita
-        # antes de que la app se cierre, la dejamos igual: no bloqueamos
-        # el cierre.
+        # si hay un TEST de Mutter pendiente sin confirmar, el propio
+        # compositor lo revierte solo (timeout interno). GSettings no
+        # tiene ese mecanismo, así que si cerramos con un preview de
+        # texto/UI sin confirmar, lo revertimos nosotros a mano.
+        if isinstance(self.stage, TextScaleStage) and self.stage._pending:
+            self.stage.restore_original()
         return False
 
 
