@@ -353,6 +353,69 @@ def recommend_range(recommended: float, supported_scales: list[float]) -> tuple[
     return (lo, hi)
 
 
+# Resoluciones "de catálogo" conocidas, para el modo de equivalencia. No
+# hace falta que estén ordenadas; se filtran por aspect ratio y se
+# ordenan por escala resultante al calcularlas.
+COMMON_RESOLUTIONS: list[tuple[int, int, str]] = [
+    (1280, 720, "720p"),
+    (1366, 768, "768p"),
+    (1600, 900, "900p"),
+    (1920, 1080, "1080p"),
+    (2560, 1440, "1440p"),
+    (3200, 1800, "1800p"),
+    (3840, 2160, "2160p (4K)"),
+    (1024, 768, "768p (4:3)"),
+    (1280, 1024, "SXGA (5:4)"),
+    (1680, 1050, "WSXGA+ (16:10)"),
+    (1920, 1200, "WUXGA (16:10)"),
+    (2560, 1600, "WQXGA (16:10)"),
+]
+
+
+@dataclass
+class ResolutionEquivalent:
+    scale: float
+    target_width: int
+    target_height: int
+    label: str
+
+
+def resolution_equivalents(
+    mode: MonitorMode,
+    aspect_tol: float = 0.02,
+    scale_tol_rel: float = 0.03,
+) -> list[ResolutionEquivalent]:
+    """De la lista de resoluciones conocidas, devuelve solo las que
+    tienen el mismo aspect ratio que el modo actual Y cuya escala
+    "ideal" (para lograr esa resolución lógica) cae cerca de un scale
+    que Mutter realmente soporta para este modo -- nunca se propone un
+    valor que Mutter vaya a rechazar."""
+    if not mode.supported_scales or mode.height == 0:
+        return []
+    native_aspect = mode.width / mode.height
+    seen_scales: set[float] = set()
+    out: list[ResolutionEquivalent] = []
+    for width, height, label in COMMON_RESOLUTIONS:
+        if height == 0:
+            continue
+        aspect = width / height
+        if abs(aspect - native_aspect) > aspect_tol * native_aspect:
+            continue
+        ideal_scale = mode.width / width
+        nearest = min(mode.supported_scales, key=lambda s: abs(s - ideal_scale))
+        if abs(nearest - ideal_scale) > scale_tol_rel * ideal_scale:
+            continue
+        key = round(nearest, 3)
+        if key in seen_scales:
+            continue
+        seen_scales.add(key)
+        out.append(ResolutionEquivalent(
+            scale=nearest, target_width=width, target_height=height, label=label,
+        ))
+    out.sort(key=lambda r: r.scale)
+    return out
+
+
 @dataclass
 class Match:
     a: float
@@ -550,6 +613,20 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         self.monitor_group.add(self.monitor_row)
         box.append(self.monitor_group)
 
+        self.mode_choice_group = Adw.PreferencesGroup(title="Modo de comparación")
+        box.append(self.mode_choice_group)
+        self.mode_radio_size = Gtk.CheckButton(
+            label="Recomendado por tamaño físico (rango continuo)"
+        )
+        self.mode_radio_size.set_active(True)
+        self.mode_radio_size.connect("toggled", self._on_compare_mode_changed)
+        self.mode_choice_group.add(self.mode_radio_size)
+        self.mode_radio_equiv = Gtk.CheckButton(
+            label="Equivalencia a resoluciones conocidas (720p, 1080p, 1440p, 4K...)"
+        )
+        self.mode_radio_equiv.set_group(self.mode_radio_size)
+        self.mode_choice_group.add(self.mode_radio_equiv)
+
         self.detect_group = Adw.PreferencesGroup(
             title="Tamaño físico y densidad",
             description="Usado solo para calcular una recomendación de rango.",
@@ -577,6 +654,24 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         self.max_row = Adw.SpinRow.new_with_range(50, 400, 5)
         self.max_row.set_title("Máximo (%)")
         self.range_group.add(self.max_row)
+
+        self.equiv_group = Adw.PreferencesGroup(
+            title="Resoluciones equivalentes",
+            description="Solo se ofrecen las que este monitor soporta de "
+                         "verdad (mismo aspect ratio, escala exacta que "
+                         "acepta Mutter). Marcá al menos dos para duelar.",
+        )
+        self.equiv_group.set_visible(False)
+        box.append(self.equiv_group)
+        self.equiv_checks: dict[float, Gtk.CheckButton] = {}
+        self.equiv_empty_label = Gtk.Label(
+            label="Este monitor no ofrece equivalencias de resolución "
+                  "conocidas dentro de lo que Mutter permite.",
+            wrap=True, xalign=0.0,
+        )
+        self.equiv_empty_label.add_css_class("dim-label")
+        self.equiv_empty_label.set_visible(False)
+        self.equiv_group.add(self.equiv_empty_label)
 
         start_btn = Gtk.Button(label="Empezar los duelos a ciegas")
         start_btn.add_css_class("suggested-action")
@@ -630,6 +725,29 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         self._diagonal_source_detected = detected is not None
         self.diagonal_row.set_value(detected if detected is not None else 15.6)
         self._recompute_recommendation()
+        self._rebuild_equiv_group(mode)
+
+    def _on_compare_mode_changed(self, _btn) -> None:
+        size_mode = self.mode_radio_size.get_active()
+        self.detect_group.set_visible(size_mode)
+        self.range_group.set_visible(size_mode)
+        self.equiv_group.set_visible(not size_mode)
+
+    def _rebuild_equiv_group(self, mode: MonitorMode) -> None:
+        for check in list(self.equiv_checks.values()):
+            self.equiv_group.remove(check)
+        self.equiv_checks.clear()
+
+        equivalents = resolution_equivalents(mode)
+        self.equiv_empty_label.set_visible(not equivalents)
+        for eq in equivalents:
+            check = Gtk.CheckButton(
+                label=f"{eq.label} ({eq.target_width}x{eq.target_height}, "
+                      f"{round(eq.scale * 100)}%)"
+            )
+            check.set_active(abs(eq.scale - 1.0) < 1e-6)
+            self.equiv_group.add(check)
+            self.equiv_checks[eq.scale] = check
 
     def _on_diagonal_changed(self) -> None:
         self._diagonal_source_detected = False
@@ -663,15 +781,22 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         idx = self.monitor_row.get_selected()
         connector = self._monitor_connectors[idx]
         monitor = self.monitors[connector]
-        lo = self.min_row.get_value() / 100.0
-        hi = self.max_row.get_value() / 100.0
-        levels = filter_candidates_by_range(self._current_candidates, lo, hi)
-        if len(levels) < 2:
-            self._toast(
-                "Ese rango solo tiene un escalado soportado por el monitor -- "
-                "ampliá el mínimo/máximo"
-            )
-            return
+
+        if self.mode_radio_size.get_active():
+            lo = self.min_row.get_value() / 100.0
+            hi = self.max_row.get_value() / 100.0
+            levels = filter_candidates_by_range(self._current_candidates, lo, hi)
+            if len(levels) < 2:
+                self._toast(
+                    "Ese rango solo tiene un escalado soportado por el "
+                    "monitor -- ampliá el mínimo/máximo"
+                )
+                return
+        else:
+            levels = [lvl for lvl, chk in self.equiv_checks.items() if chk.get_active()]
+            if len(levels) < 2:
+                self._toast("Marcá al menos dos resoluciones equivalentes para duelar")
+                return
 
         try:
             self.stage = ScaleStage(self.dc, monitor)

@@ -72,7 +72,7 @@ _install_gi_stubs()
 from scale_duel import (  # noqa: E402
     DuelState, scale_candidates, MonitorMode,
     filter_candidates_by_range, diagonal_inches, parse_edid_physical_size_cm,
-    compute_ppi, recommend_scale, recommend_range,
+    compute_ppi, recommend_scale, recommend_range, resolution_equivalents,
 )
 
 
@@ -224,3 +224,48 @@ def test_recommend_range_clamped_to_supported_scales():
     lo2, hi2 = recommend_range(1.0, supported)
     assert lo2 == 1.0
     assert hi2 == 1.5
+
+
+def test_resolution_equivalents_matches_real_1080p_laptop_panel():
+    # caso real medido en esta laptop: panel 1920x1080, Mutter solo
+    # ofrece scales >= 1.0 para este modo (no soporta "downscaling"
+    # para emular 1440p/4K en este hardware).
+    mode = MonitorMode(
+        mode_id="0", width=1920, height=1080, refresh=60.0,
+        preferred_scale=1.0,
+        supported_scales=[1.0, 1.25, 1.3333333730697632, 1.5, 1.6666666269302368, 2.0],
+        is_current=True, is_preferred=True,
+    )
+    results = resolution_equivalents(mode)
+    labels = {r.label: r.scale for r in results}
+    assert "1080p" in labels and abs(labels["1080p"] - 1.0) < 1e-6
+    assert "720p" in labels and abs(labels["720p"] - 1.5) < 1e-6
+    # no debería inventar equivalencias que Mutter rechazaría (1440p/4K
+    # necesitarían scale < 1.0, que este panel no soporta)
+    assert "1440p" not in labels
+    assert "2160p (4K)" not in labels
+    # 16:10 no debe colarse por aspect ratio distinto
+    assert "WSXGA+ (16:10)" not in labels
+
+
+def test_resolution_equivalents_supports_downscale_on_hidpi_panel():
+    # panel 4K típico que sí soporta escalas fraccionarias hacia abajo
+    mode = MonitorMode(
+        mode_id="0", width=3840, height=2160, refresh=60.0,
+        preferred_scale=2.0,
+        supported_scales=[0.5, 0.75, 1.0, 1.25, 1.5, 2.0],
+        is_current=True, is_preferred=True,
+    )
+    results = resolution_equivalents(mode)
+    labels = {r.label: r.scale for r in results}
+    assert abs(labels["1440p"] - 1.5) < 1e-6  # 3840/2560 = 1.5
+    assert abs(labels["2160p (4K)"] - 1.0) < 1e-6
+
+
+def test_resolution_equivalents_empty_without_supported_scales():
+    mode = MonitorMode(
+        mode_id="0", width=1920, height=1080, refresh=60.0,
+        preferred_scale=1.0, supported_scales=[],
+        is_current=True, is_preferred=True,
+    )
+    assert resolution_equivalents(mode) == []
