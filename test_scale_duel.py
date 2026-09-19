@@ -69,7 +69,11 @@ def _install_gi_stubs():
 
 _install_gi_stubs()
 
-from scale_duel import DuelState, scale_candidates, MonitorMode  # noqa: E402
+from scale_duel import (  # noqa: E402
+    DuelState, scale_candidates, MonitorMode,
+    filter_candidates_by_range, diagonal_inches, parse_edid_physical_size_cm,
+    compute_ppi, recommend_scale, recommend_range,
+)
 
 
 def test_duel_two_levels_picks_the_chosen_one():
@@ -167,3 +171,56 @@ def test_scale_candidates_no_supported_scales_falls_back_to_100():
         is_current=True, is_preferred=True,
     )
     assert scale_candidates(mode) == [1.0]
+
+
+def test_filter_candidates_by_range_keeps_only_inside_bounds():
+    candidates = [1.0, 1.25, 1.5, 1.75, 2.0]
+    assert filter_candidates_by_range(candidates, 1.25, 1.75) == [1.25, 1.5, 1.75]
+
+
+def test_filter_candidates_by_range_swaps_if_inverted():
+    candidates = [1.0, 1.25, 1.5]
+    assert filter_candidates_by_range(candidates, 1.5, 1.0) == candidates
+
+
+def test_diagonal_inches_matches_known_panel():
+    # panel de 34x19 cm (medido real vía EDID) es ~15.3"
+    assert abs(diagonal_inches(34, 19) - 15.34) < 0.05
+
+
+def test_parse_edid_physical_size_ignores_zero():
+    edid = bytearray(30)
+    edid[21] = 0
+    edid[22] = 0
+    assert parse_edid_physical_size_cm(bytes(edid)) is None
+
+    edid[21] = 34
+    edid[22] = 19
+    assert parse_edid_physical_size_cm(bytes(edid)) == (34, 19)
+
+
+def test_parse_edid_physical_size_too_short():
+    assert parse_edid_physical_size_cm(b"\x00" * 10) is None
+
+
+def test_compute_ppi_matches_expected_1080p_laptop():
+    ppi = compute_ppi(1920, 1080, 15.34)
+    assert 140 < ppi < 148
+
+
+def test_recommend_scale_rounds_to_quarter_steps():
+    assert recommend_scale(96) == 1.0
+    assert recommend_scale(144) == 1.5
+    assert recommend_scale(190) == 2.0
+    assert recommend_scale(48) == 1.0  # nunca por debajo de 100%
+
+
+def test_recommend_range_clamped_to_supported_scales():
+    supported = [1.0, 1.25, 1.5, 1.75, 2.0]
+    lo, hi = recommend_range(1.5, supported)
+    assert lo == 1.0
+    assert hi == 2.0
+
+    lo2, hi2 = recommend_range(1.0, supported)
+    assert lo2 == 1.0
+    assert hi2 == 1.5

@@ -44,8 +44,12 @@ DBUS_SESSION_BUS_ADDRESS apuntando a tu sesión de GNOME.
 """
 from __future__ import annotations
 
-import sys
+import glob
+import math
+import os
 import random
+import re
+import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -258,6 +262,97 @@ def scale_candidates(mode: MonitorMode) -> list[float]:
     return sorted(c for c in candidates if lo - 1e-6 <= c <= hi + 1e-6)
 
 
+def filter_candidates_by_range(candidates: list[float], lo: float, hi: float) -> list[float]:
+    """Recorta la lista de candidatos a los que caen dentro de [lo, hi]
+    (el rango que el usuario definió como piso y techo del duelo)."""
+    if lo > hi:
+        lo, hi = hi, lo
+    return [c for c in candidates if lo - 1e-6 <= c <= hi + 1e-6]
+
+
+def diagonal_inches(width_cm: float, height_cm: float) -> float:
+    """Diagonal en pulgadas a partir del tamaño físico (en cm) que
+    reporta el EDID del panel."""
+    return math.hypot(width_cm, height_cm) / 2.54
+
+
+def parse_edid_physical_size_cm(edid_bytes: bytes) -> Optional[tuple[int, int]]:
+    """Tamaño físico (ancho_cm, alto_cm) declarado en el EDID (offsets
+    21/22), o None si el EDID es muy corto o no lo declara (0x0, típico
+    de proyectores o EDIDs sintéticos)."""
+    if len(edid_bytes) < 23:
+        return None
+    width_cm, height_cm = edid_bytes[21], edid_bytes[22]
+    if width_cm == 0 or height_cm == 0:
+        return None
+    return width_cm, height_cm
+
+
+def find_edid_sysfs_path(connector: str) -> Optional[str]:
+    """Busca el archivo EDID en /sys/class/drm para el connector que
+    reporta Mutter (p.ej. 'eDP-1'), que en sysfs aparece con un
+    prefijo 'cardN-' que hay que descartar."""
+    for path in glob.glob("/sys/class/drm/*/edid"):
+        dirname = os.path.basename(os.path.dirname(path))
+        suffix = re.sub(r"^card\d+-", "", dirname)
+        if suffix == connector:
+            return path
+    return None
+
+
+def detect_diagonal_inches(connector: str) -> Optional[float]:
+    """Intenta leer el tamaño físico real del panel vía EDID (sysfs).
+    Devuelve None si no se pudo (sin permisos, EDID vacío/sin tamaño,
+    monitor externo sin esa info, etc.) y en ese caso el usuario tiene
+    que ingresar la diagonal a mano."""
+    path = find_edid_sysfs_path(connector)
+    if path is None:
+        return None
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return None
+    size = parse_edid_physical_size_cm(data)
+    if size is None:
+        return None
+    return round(diagonal_inches(*size), 2)
+
+
+def compute_ppi(width_px: int, height_px: int, diagonal_in: float) -> float:
+    """Pixeles por pulgada a partir de la resolución y la diagonal
+    física del panel."""
+    if diagonal_in <= 0:
+        return 0.0
+    return math.hypot(width_px, height_px) / diagonal_in
+
+
+def recommend_scale(ppi: float) -> float:
+    """Escala 'natural' recomendada al estilo GNOME: ppi/96 redondeado
+    a pasos de 0.25, nunca por debajo de 100%."""
+    if ppi <= 0:
+        return 1.0
+    raw = ppi / 96.0
+    step = 0.25
+    val = round(raw / step) * step
+    return max(1.0, round(val, 2))
+
+
+def recommend_range(recommended: float, supported_scales: list[float]) -> tuple[float, float]:
+    """Rango sugerido de escalado a comparar: +/-0.5 alrededor de la
+    escala recomendada, recortado a lo que el monitor soporta de
+    verdad según Mutter."""
+    if not supported_scales:
+        return (recommended, recommended)
+    lo_bound = min(supported_scales)
+    hi_bound = max(supported_scales)
+    lo = max(lo_bound, round(recommended - 0.5, 2))
+    hi = min(hi_bound, round(recommended + 0.5, 2))
+    if lo > hi:
+        lo = hi = max(lo_bound, min(recommended, hi_bound))
+    return (lo, hi)
+
+
 @dataclass
 class Match:
     a: float
@@ -386,6 +481,9 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         self.stage: Optional[ScaleStage] = None
         self.duel: Optional[DuelState] = None
         self._revert_timeout_id: Optional[int] = None
+        self._current_candidates: list[float] = []
+        self._diagonal_source_detected = False
+        self._winner_scale: Optional[float] = None
 
         self.toolbar_view = Adw.ToolbarView()
         self.set_content(self.toolbar_view)
@@ -427,20 +525,21 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         self.error_label.set_label(message)
         self.stack.set_visible_child_name("error")
 
-    # -- página de selección de monitor y escalas -------------------------
+    # -- página de selección de monitor y rango de escalado ----------------
     def _build_setup_page(self) -> None:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18,
                        margin_top=28, margin_bottom=28, margin_start=24, margin_end=24)
 
-        title = Gtk.Label(label="Elegí el monitor y los niveles a comparar")
+        title = Gtk.Label(label="Elegí el monitor y el rango a comparar")
         title.add_css_class("title-2")
         title.set_halign(Gtk.Align.START)
         box.append(title)
 
         subtitle = Gtk.Label(
-            label="Vamos a aplicar cada escalado de verdad en la pantalla "
-                  "(modo prueba, se revierte solo si no confirmás) y vas "
-                  "a elegir cuál se ve mejor, en duelos de a dos.",
+            label="Definí el piso y el techo del escalado a probar. Vamos a "
+                  "armar un bracket a ciegas entre esos valores -- no vas a "
+                  "ver el porcentaje real hasta el final, solo cuál se ve "
+                  "mejor. Ahí decidís si lo aplicás o lo descartás.",
             wrap=True, xalign=0.0,
         )
         subtitle.add_css_class("dim-label")
@@ -451,25 +550,35 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         self.monitor_group.add(self.monitor_row)
         box.append(self.monitor_group)
 
-        self.scales_group = Adw.PreferencesGroup(
-            title="Niveles de escalado a comparar",
-            description="Se arma un bracket de eliminación directa con todos "
-                         "los que marques.",
+        self.detect_group = Adw.PreferencesGroup(
+            title="Tamaño físico y densidad",
+            description="Usado solo para calcular una recomendación de rango.",
         )
-        box.append(self.scales_group)
-        self.scale_checks: dict[float, Gtk.CheckButton] = {}
+        box.append(self.detect_group)
+        self.diagonal_row = Adw.SpinRow.new_with_range(5.0, 100.0, 0.1)
+        self.diagonal_row.set_title("Diagonal del panel (pulgadas)")
+        self.diagonal_row.set_digits(1)
+        self.diagonal_row.connect("notify::value", lambda *_: self._on_diagonal_changed())
+        self.detect_group.add(self.diagonal_row)
+        self.detect_label = Gtk.Label(wrap=True, xalign=0.0)
+        self.detect_label.add_css_class("dim-label")
+        self.detect_group.add(self.detect_label)
 
-        self.mode_group = Adw.PreferencesGroup(title="Al terminar")
-        self.mode_row = Adw.SwitchRow(
-            title="Dejar aplicado el ganador",
-            subtitle="Si lo apagás, solo te muestro el porcentaje y "
-                     "restauro el escalado que tenías antes de abrir la app.",
+        self.range_group = Adw.PreferencesGroup(
+            title="Rango de escalado a duelar",
+            description="Piso y techo del bracket de eliminación directa. "
+                         "Se toman todos los escalados que soporta el monitor "
+                         "dentro de ese rango.",
         )
-        self.mode_row.set_active(True)
-        self.mode_group.add(self.mode_row)
-        box.append(self.mode_group)
+        box.append(self.range_group)
+        self.min_row = Adw.SpinRow.new_with_range(50, 400, 5)
+        self.min_row.set_title("Mínimo (%)")
+        self.range_group.add(self.min_row)
+        self.max_row = Adw.SpinRow.new_with_range(50, 400, 5)
+        self.max_row.set_title("Máximo (%)")
+        self.range_group.add(self.max_row)
 
-        start_btn = Gtk.Button(label="Empezar los duelos")
+        start_btn = Gtk.Button(label="Empezar los duelos a ciegas")
         start_btn.add_css_class("suggested-action")
         start_btn.add_css_class("pill")
         start_btn.set_halign(Gtk.Align.CENTER)
@@ -516,39 +625,52 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         if mode is None:
             return
 
-        # limpiar checks anteriores
-        for child_row in list(self.scale_checks.values()):
-            self.scales_group.remove(child_row.get_parent().get_parent()
-                                      if child_row.get_parent() else child_row)
-        self.scale_checks.clear()
-        # Adw.PreferencesGroup no tiene "clear" directo; reconstruimos el grupo
-        parent = self.scales_group.get_parent()
-        new_group = Adw.PreferencesGroup(
-            title="Niveles de escalado a comparar",
-            description="Se arma un bracket de eliminación directa con todos "
-                         "los que marques.",
-        )
-        if parent is not None:
-            idx_in_parent = 0
-            box = parent
-            box.remove(self.scales_group)
-            box.insert_child_after(new_group, self.monitor_group)
-        self.scales_group = new_group
+        self._current_candidates = scale_candidates(mode)
+        detected = detect_diagonal_inches(connector)
+        self._diagonal_source_detected = detected is not None
+        self.diagonal_row.set_value(detected if detected is not None else 15.6)
+        self._recompute_recommendation()
 
-        candidates = scale_candidates(mode)
-        for c in candidates:
-            check = Gtk.CheckButton(label=f"{round(c * 100)}%")
-            check.set_active(abs(c - monitor.current_scale) < 1e-6 or abs(c - 1.0) < 1e-6)
-            self.scales_group.add(check)
-            self.scale_checks[c] = check
+    def _on_diagonal_changed(self) -> None:
+        self._diagonal_source_detected = False
+        self._recompute_recommendation()
+
+    def _recompute_recommendation(self) -> None:
+        idx = self.monitor_row.get_selected()
+        if idx < 0 or idx >= len(getattr(self, "_monitor_connectors", [])):
+            return
+        connector = self._monitor_connectors[idx]
+        monitor = self.monitors[connector]
+        mode = monitor.current_mode
+        if mode is None:
+            return
+
+        diagonal = self.diagonal_row.get_value()
+        ppi = compute_ppi(mode.width, mode.height, diagonal)
+        rec = recommend_scale(ppi)
+        lo, hi = recommend_range(rec, self._current_candidates or mode.supported_scales)
+
+        origin = "detectada por EDID" if self._diagonal_source_detected else "ingresada a mano"
+        self.detect_label.set_label(
+            f"Resolución {mode.width}x{mode.height}, diagonal {origin} de "
+            f"{diagonal:.1f}\" -> ~{ppi:.0f} PPI. Recomendación: ~"
+            f"{round(rec * 100)}%, rango sugerido {round(lo * 100)}%–{round(hi * 100)}%."
+        )
+        self.min_row.set_value(round(lo * 100))
+        self.max_row.set_value(round(hi * 100))
 
     def _on_start_clicked(self, _btn) -> None:
         idx = self.monitor_row.get_selected()
         connector = self._monitor_connectors[idx]
         monitor = self.monitors[connector]
-        levels = [lvl for lvl, chk in self.scale_checks.items() if chk.get_active()]
+        lo = self.min_row.get_value() / 100.0
+        hi = self.max_row.get_value() / 100.0
+        levels = filter_candidates_by_range(self._current_candidates, lo, hi)
         if len(levels) < 2:
-            self._toast("Elegí al menos dos niveles de escalado para comparar")
+            self._toast(
+                "Ese rango solo tiene un escalado soportado por el monitor -- "
+                "ampliá el mínimo/máximo"
+            )
             return
 
         try:
@@ -558,7 +680,6 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
             return
 
         self.duel = DuelState(levels)
-        self._keep_winner = self.mode_row.get_active()
         self._start_current_match()
 
     # -- página de duelo ----------------------------------------------------
@@ -572,26 +693,26 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         box.append(self.progress_label)
 
         info = Gtk.Label(
-            label="Mirá la pantalla: acabamos de aplicar el primer nivel. "
-                  "Elegí el que se vea mejor.",
+            label="Mirá la pantalla, no el número: acabamos de aplicar la "
+                  "opción A. Elegí la que se vea mejor, a ciegas.",
             wrap=True, xalign=0.0,
         )
         box.append(info)
 
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
                            homogeneous=True)
-        self.btn_a = Gtk.Button()
+        self.btn_a = Gtk.Button(label="Opción A")
         self.btn_a.add_css_class("pill")
         self.btn_a.connect("clicked", lambda *_: self._on_pick(0))
         buttons.append(self.btn_a)
 
-        self.btn_b = Gtk.Button()
+        self.btn_b = Gtk.Button(label="Opción B")
         self.btn_b.add_css_class("pill")
         self.btn_b.connect("clicked", lambda *_: self._on_pick(1))
         buttons.append(self.btn_b)
         box.append(buttons)
 
-        replay = Gtk.Button(label="Volver a mostrar ambos (alternar)")
+        replay = Gtk.Button(label="Volver a mostrar ambas (alternar)")
         replay.connect("clicked", lambda *_: self._toggle_preview())
         box.append(replay)
 
@@ -608,8 +729,6 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         self.progress_label.set_label(
             f"Ronda {self.duel.round_num} — enfrentamiento {this_match} de {total}"
         )
-        self.btn_a.set_label(f"Elegir {round(match.a * 100)}%")
-        self.btn_b.set_label(f"Elegir {round(match.b * 100)}%")
         self._current_match = match
         self._preview_showing_first = True
         self._apply_preview(match.a)
@@ -619,7 +738,7 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         try:
             self.stage.try_scale(scale)
         except DisplayConfigError as e:
-            self._toast(f"No se pudo aplicar {round(scale*100)}%: {e}")
+            self._toast(f"No se pudo aplicar esa opción: {e}")
 
     def _toggle_preview(self) -> None:
         match = self._current_match
@@ -638,21 +757,30 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
     def _finish_duel(self) -> None:
         assert self.duel is not None and self.duel.winner is not None
         winner = self.duel.winner
+        self._winner_scale = winner
+        # el ganador queda aplicado en modo TEST (ya lo estaba, del último
+        # duelo) mientras el usuario decide si lo confirma o lo descarta
         self.result_pct_label.set_label(f"{round(winner * 100)}%")
-        if self._keep_winner:
-            try:
-                self.stage.confirm(winner)
-                self.result_note.set_label(
-                    "Se aplicó y quedó guardado como escalado del monitor."
-                )
-            except DisplayConfigError as e:
-                self.result_note.set_label(f"No se pudo dejarlo guardado: {e}")
-        else:
-            self.stage.restore_original()
-            self.result_note.set_label(
-                "No se guardó ningún cambio: se restauró el escalado anterior."
-            )
+        self.result_note.set_label(
+            "Así quedó la pantalla ahora mismo con el ganador del bracket. "
+            "¿Lo dejamos aplicado o volvemos al escalado que tenías antes?"
+        )
         self.stack.set_visible_child_name("result")
+
+    def _on_apply_winner(self, _btn) -> None:
+        try:
+            self.stage.confirm(self._winner_scale)
+            self.result_note.set_label(
+                "Se aplicó y quedó guardado como escalado del monitor."
+            )
+        except DisplayConfigError as e:
+            self.result_note.set_label(f"No se pudo dejarlo guardado: {e}")
+
+    def _on_discard_winner(self, _btn) -> None:
+        self.stage.restore_original()
+        self.result_note.set_label(
+            "No se guardó ningún cambio: se restauró el escalado anterior."
+        )
 
     # -- página de resultado -------------------------------------------------
     def _build_result_page(self) -> None:
@@ -668,7 +796,21 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         self.result_note = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER)
         self.result_note.add_css_class("dim-label")
         box.append(self.result_note)
-        again = Gtk.Button(label="Repetir con otros niveles")
+
+        decision = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
+                            homogeneous=True, halign=Gtk.Align.CENTER)
+        apply_btn = Gtk.Button(label="Aplicar y guardar")
+        apply_btn.add_css_class("suggested-action")
+        apply_btn.add_css_class("pill")
+        apply_btn.connect("clicked", self._on_apply_winner)
+        decision.append(apply_btn)
+        discard_btn = Gtk.Button(label="Descartar y restaurar")
+        discard_btn.add_css_class("pill")
+        discard_btn.connect("clicked", self._on_discard_winner)
+        decision.append(discard_btn)
+        box.append(decision)
+
+        again = Gtk.Button(label="Repetir con otro rango")
         again.connect("clicked", lambda *_: self.stack.set_visible_child_name("setup"))
         box.append(again)
         self.stack.add_named(box, "result")
