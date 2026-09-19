@@ -417,6 +417,53 @@ def resolution_equivalents(
 
 
 @dataclass
+class ResolutionTarget:
+    label: str
+    target_width: int
+    target_height: int
+    ideal_scale: float
+    achievable_scale: Optional[float]
+
+    @property
+    def achievable(self) -> bool:
+        return self.achievable_scale is not None
+
+
+def resolution_targets(
+    mode: MonitorMode,
+    aspect_tol: float = 0.02,
+    scale_tol_rel: float = 0.03,
+) -> list[ResolutionTarget]:
+    """Como resolution_equivalents(), pero devuelve TODAS las
+    resoluciones de catálogo con el mismo aspect ratio -- incluidas las
+    que este monitor no puede lograr -- para que la UI pueda mostrarle
+    al usuario el espectro completo y por qué algunas están bloqueadas
+    (Mutter las rechaza para este modo/panel)."""
+    if mode.height == 0:
+        return []
+    native_aspect = mode.width / mode.height
+    out: list[ResolutionTarget] = []
+    for width, height, label in COMMON_RESOLUTIONS:
+        if height == 0:
+            continue
+        aspect = width / height
+        if abs(aspect - native_aspect) > aspect_tol * native_aspect:
+            continue
+        ideal_scale = mode.width / width
+        achievable_scale = None
+        if mode.supported_scales:
+            nearest = min(mode.supported_scales, key=lambda s: abs(s - ideal_scale))
+            if abs(nearest - ideal_scale) <= scale_tol_rel * ideal_scale:
+                achievable_scale = nearest
+        out.append(ResolutionTarget(
+            label=label, target_width=width, target_height=height,
+            ideal_scale=ideal_scale, achievable_scale=achievable_scale,
+        ))
+    out.sort(key=lambda r: r.ideal_scale)
+    return out
+
+
+@dataclass
 class Match:
     a: float
     b: float
@@ -664,6 +711,7 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         self.equiv_group.set_visible(False)
         box.append(self.equiv_group)
         self.equiv_checks: dict[float, Gtk.CheckButton] = {}
+        self._equiv_rows: list[Gtk.CheckButton] = []
         self.equiv_empty_label = Gtk.Label(
             label="Este monitor no ofrece equivalencias de resolución "
                   "conocidas dentro de lo que Mutter permite.",
@@ -734,20 +782,30 @@ class ScaleDuelWindow(Adw.ApplicationWindow):
         self.equiv_group.set_visible(not size_mode)
 
     def _rebuild_equiv_group(self, mode: MonitorMode) -> None:
-        for check in list(self.equiv_checks.values()):
+        for check in list(self._equiv_rows):
             self.equiv_group.remove(check)
+        self._equiv_rows = []
         self.equiv_checks.clear()
 
-        equivalents = resolution_equivalents(mode)
-        self.equiv_empty_label.set_visible(not equivalents)
-        for eq in equivalents:
-            check = Gtk.CheckButton(
-                label=f"{eq.label} ({eq.target_width}x{eq.target_height}, "
-                      f"{round(eq.scale * 100)}%)"
-            )
-            check.set_active(abs(eq.scale - 1.0) < 1e-6)
+        targets = resolution_targets(mode)
+        self.equiv_empty_label.set_visible(not targets)
+        for t in targets:
+            if t.achievable:
+                check = Gtk.CheckButton(
+                    label=f"{t.label} ({t.target_width}x{t.target_height}, "
+                          f"{round(t.achievable_scale * 100)}%)"
+                )
+                check.set_active(abs(t.achievable_scale - 1.0) < 1e-6)
+                self.equiv_checks[t.achievable_scale] = check
+            else:
+                check = Gtk.CheckButton(
+                    label=f"{t.label} ({t.target_width}x{t.target_height}, "
+                          f"necesitaría {round(t.ideal_scale * 100)}% -- este "
+                          f"monitor no lo soporta)"
+                )
+                check.set_sensitive(False)
             self.equiv_group.add(check)
-            self.equiv_checks[eq.scale] = check
+            self._equiv_rows.append(check)
 
     def _on_diagonal_changed(self) -> None:
         self._diagonal_source_detected = False

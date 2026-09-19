@@ -73,6 +73,7 @@ from scale_duel import (  # noqa: E402
     DuelState, scale_candidates, MonitorMode,
     filter_candidates_by_range, diagonal_inches, parse_edid_physical_size_cm,
     compute_ppi, recommend_scale, recommend_range, resolution_equivalents,
+    resolution_targets,
 )
 
 
@@ -269,3 +270,21 @@ def test_resolution_equivalents_empty_without_supported_scales():
         is_current=True, is_preferred=True,
     )
     assert resolution_equivalents(mode) == []
+
+
+def test_resolution_targets_marks_unachievable_1440p_on_real_laptop_panel():
+    mode = MonitorMode(
+        mode_id="0", width=1920, height=1080, refresh=60.0,
+        preferred_scale=1.0,
+        supported_scales=[1.0, 1.25, 1.3333333730697632, 1.5, 1.6666666269302368, 2.0],
+        is_current=True, is_preferred=True,
+    )
+    targets = {t.label: t for t in resolution_targets(mode)}
+    assert targets["1440p"].achievable is False
+    assert abs(targets["1440p"].ideal_scale - 0.75) < 1e-6
+    assert targets["1080p"].achievable is True
+    assert targets["720p"].achievable is True
+    # el orden es por escala ideal ascendente (de "más grande lógico" a
+    # "más chico lógico")
+    scales = [t.ideal_scale for t in targets.values()]
+    assert scales == sorted(scales)
