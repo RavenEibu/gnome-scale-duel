@@ -115,7 +115,7 @@ please open an issue with the traceback.
 ## Known limitations
 
 - Mutter scaling sends only the selected monitor in `ApplyMonitorsConfig`;
-  it does not preserve the full multi-monitor layout. Mutter 50.4 classifies
+  it does not preserve the full multi-monitor layout. Mutter 50.4 and 50.5 classify
   connected monitors omitted from that payload as disabled. Use this
   mechanism with a single connected monitor until full-layout preservation
   is implemented and validated on real multi-monitor hardware. This
