@@ -210,7 +210,7 @@ class MutterDisplayConfig:
     ) -> None:
         """Envía sólo el monitor elegido; no preserva el layout completo.
 
-        Mutter 50.4 clasifica los monitores conectados omitidos como
+        Mutter 50.4 y 50.5 clasifican los monitores conectados omitidos como
         deshabilitados. La preservación multi-monitor no está implementada.
         """
         assert self._proxy is not None
