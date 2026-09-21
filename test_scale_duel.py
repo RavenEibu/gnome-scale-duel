@@ -165,13 +165,39 @@ def test_scale_candidates_narrow_range_hidpi():
     assert min(candidates) >= 1.0 - 1e-6
 
 
-def test_scale_candidates_no_supported_scales_falls_back_to_100():
+def test_scale_candidates_no_supported_scales_offers_nothing():
     mode = MonitorMode(
         mode_id="0", width=1920, height=1080, refresh=60.0,
         preferred_scale=1.0, supported_scales=[],
         is_current=True, is_preferred=True,
     )
-    assert scale_candidates(mode) == [1.0]
+    assert scale_candidates(mode) == []
+
+
+def test_scale_candidates_preserves_exact_non_quarter_supported_values():
+    supported = [1.0, 1.25, 1.3333333730697632, 1.5, 1.6666666269302368, 2.0]
+    mode = MonitorMode(
+        mode_id="0", width=1920, height=1080, refresh=60.0,
+        preferred_scale=1.3333333730697632, supported_scales=supported,
+        is_current=True, is_preferred=True,
+    )
+    assert scale_candidates(mode) == supported
+    # Exercise the size-mode pipeline: narrowing the range must not add 1.75
+    # or round an advertised value before it reaches the duel.
+    assert filter_candidates_by_range(scale_candidates(mode), 1.3, 1.8) == [
+        1.3333333730697632, 1.5, 1.6666666269302368,
+    ]
+
+
+def test_scale_candidates_does_not_inject_unsupported_defaults():
+    supported = [1.5, 0.8, 1.25, 1.5]
+    mode = MonitorMode(
+        mode_id="0", width=1920, height=1080, refresh=60.0,
+        preferred_scale=1.1, supported_scales=supported,
+        is_current=True, is_preferred=True,
+    )
+    assert scale_candidates(mode) == [0.8, 1.25, 1.5]
+    assert supported == [1.5, 0.8, 1.25, 1.5]
 
 
 def test_filter_candidates_by_range_keeps_only_inside_bounds():
