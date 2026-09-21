@@ -208,9 +208,11 @@ class MutterDisplayConfig:
         mode_id: str,
         scale: float,
     ) -> None:
-        """Aplica una config de un solo monitor usando el layout actual
-        para el resto (si hay más de uno) y solo cambia el scale del
-        monitor elegido."""
+        """Envía sólo el monitor elegido; no preserva el layout completo.
+
+        Mutter 50.4 clasifica los monitores conectados omitidos como
+        deshabilitados. La preservación multi-monitor no está implementada.
+        """
         assert self._proxy is not None
 
         logical_monitors = [(
@@ -238,22 +240,12 @@ class MutterDisplayConfig:
 
 
 def scale_candidates(mode: MonitorMode) -> list[float]:
-    """A partir de los scales que reporta Mutter para el modo, arma una
-    lista prolija de candidatos (pasos de 0.25, sin duplicados, con el
-    100% siempre incluido)."""
-    if not mode.supported_scales:
-        return [1.0]
-    lo = min(mode.supported_scales)
-    hi = max(mode.supported_scales)
-    candidates = set()
-    step = 0.25
-    v = round(lo / step) * step
-    while v <= hi + 1e-6:
-        candidates.add(round(v, 2))
-        v += step
-    candidates.add(1.0)
-    candidates.add(round(mode.preferred_scale, 2))
-    return sorted(c for c in candidates if lo - 1e-6 <= c <= hi + 1e-6)
+    """Candidatos exactos anunciados por Mutter, ordenados y sin duplicados.
+
+    No interpola, redondea ni agrega escalas por defecto: una lista de
+    supported_scales vacía no permite ofrecer ningún candidato.
+    """
+    return sorted(set(mode.supported_scales))
 
 
 def filter_candidates_by_range(candidates: list[float], lo: float, hi: float) -> list[float]:
